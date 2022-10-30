@@ -1,0 +1,5 @@
+main resources for this project: 
+Original paper: https://arxiv.org/abs/1804.02767
+Original authors' repo: https://github.com/pjreddie/darknet
+
+blog: https://blog.paperspace.com/how-to-implement-a-yolo-object-detector-in-pytorch/
