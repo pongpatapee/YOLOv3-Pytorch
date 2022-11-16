@@ -1,157 +1,168 @@
-from queue import Empty
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
+
+#3 different types of blocks secified by if its a Tuple, List, or Str
+config = [
+    (32, 3, 1),
+    (64, 3, 2),
+    ["B", 1],
+    (128, 3, 2),
+    ["B", 2],
+    (256, 3, 2),
+    ["B", 8],
+    (512, 3, 2),
+    ["B", 8],
+    (1024, 3, 2),
+    ["B", 4],  # To this point is Darknet-53
+    (512, 1, 1),
+    (1024, 3, 1),
+    "S",
+    (256, 1, 1),
+    "U",
+    (256, 1, 1),
+    (512, 3, 1),
+    "S",
+    (128, 1, 1),
+    "U",
+    (128, 1, 1),
+    (256, 3, 1),
+    "S",
+]
+
+class CNNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, bn_act=True, **kwargs):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, bias=(not bn_act), **kwargs)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.leaky = nn.LeakyReLU(0.1)
+        self.use_bn_act = bn_act
+
+    def forward(self, x):
+        if self.use_bn_act:
+            return self.leaky(self.bn(self.conv(x)))
+        else:
+            return self.conv(x)
 
 
-class EmptyLayer(nn.Module):
-    def __init__(self):
-        super(EmptyLayer, self).__init__()
 
-class DetectionLayer(nn.Module):
-    def __init__(self, anchors):
-        super(DetectionLayer, self).__init__()
-        self.anchors = anchors
-
-
-def parse_config(config_file):
-    """
-    Parse the yolov3 config file
-
-    return a dictionary of necessary building blocks
-    """
-
-    with open(config_file, 'r') as f:
-        lines = f.read().split('\n')
-        lines = [l for l in lines if len(l) > 0] # remove empty lines
-        lines = [l for l in lines if l[0] != '#'] # remove comments
-        lines = [l.strip() for l in lines] # remove white spaces
-
-        block = {}
-        blocks = []
-
-        for line in lines:
-            if line[0] == "[":
-                if len(block) != 0:
-                    blocks.append(block)
-                    block={}
-
-                block["type"] = line[1:-1].strip()
-            
-            else:
-                k, v = line.split('=')
-                block[k.strip()] = v.strip()
+class ResidualBlock(nn.Module):
+    def __init__(self, channels, use_residual=True, num_repeats=1):
+        super().__init__()
+        self.layers = nn.ModuleList()
         
-        blocks.append(block)
-    return blocks
-
-def create_modules(blocks):
-    """
-    Creating modules from parsed blocks
-
-    Possible blocks:
-    1. convolutional
-    2. upsample
-    3. route
-    4. shortcut
-    5. yolo
-    6. net
-    """
-
-    net_info = blocks[0] # net block from cfg
-    module_list = nn.ModuleList()
-    input_channels = 3 # initialize input channels as 3 (RBG)
-    output_filters = []
-
-    for i, block in enumerate(blocks[1:]):
-        module = nn.Sequential()
-
-        if block['type'] == 'convolutional':
-            activation = block['activation']
-
-            try:
-                batch_norm = int(block['batch_normalize'])
-                bias = False
-            except:
-                batch_norm = 0
-                bias = True
-            
-            filters = int(block['filters'])
-            padding = int(block['pad'])
-            kernel_size = int(block['size'])
-            stride = int(block['stride'])
-
-            pad = (kernel_size - 1) if padding else 0
-
-            conv = nn.Conv2d(
-                in_channels=input_channels,
-                out_channels=filters,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=pad,
-                bias=bias
-            )
-            module.add_module(f"conv{i}", conv)
-
-            if batch_norm:
-                bn = nn.BatchNorm2d(filters)
-                module.add_module(f"batch_norm{i}", bn)
-            
-            if activation == 'leaky':
-                act = nn.LeakyReLU(0.1, inplace=True)
-                module.add_module(f"leaky{i}", act)
-
-        elif block['type'] == 'upsample':
-            stride = int(block['stride'])
-            upsample = nn.Upsample(scale_factor=2, mode='nearest')
-            module.add_module(f"upsample{i}", upsample)
-
-        elif block['type'] == 'route':
-            layers = block['layers'].split(',')
-
-            start = int(layers[0]) 
-            end = int(layers[1]) if len(layers) > 1 else 0
-
-            if start > 0:
-                start = start - i
-            if end > 0:
-                end = end - i
-
-            route = EmptyLayer()
-            module.add_module(f"route{i}", route)
-
-            if end < 0:
-                filters = output_filters[i + start] + output_filters[i + end]
-            else:
-                filters = output_filters[i + start]
-
-        elif block['type'] == 'shortcut':
-            shortcut = EmptyLayer()
-            module.add_module(f"shortcut{i}", shortcut)
-
-        elif block['type'] == 'yolo':
-            mask = block['mask'].split(",")
-            mask = [int(i) for i in mask]
-
-            anchors = block['anchors'].split(',')
-            anchors = [int(i) for i in anchors]
-            anchors = [(anchors[i], anchors[i + 1]) for i in range(0, len(anchors), 2)]
-            anchors = [anchors[i] for i in mask]
-
-            detection = DetectionLayer(anchors)
-            module.add_module(f"Detection{i}", detection)
-            
-        module_list.append(module)
-        input_channels = filters
-        output_filters.append(filters)
+        for repeat in range(num_repeats):
+            self.layers += [
+                nn.Sequential(
+                    CNNBlock(channels, channels//2, kernel_size=1), # from the paper they half the number of filters in the intial conv block
+                    CNNBlock(channels//2, channels, kernel_size=3, padding=1) # they up the number of filters back to the initial input
+                )
+            ]
+        
+        self.use_residual = use_residual
+        self.num_repeats = num_repeats
     
-    return (net_info, module_list)
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x) + x if self.use_residual else layer(x)
+
+        return x
 
 
 
+class ScalePrediction(nn.Module):
+    def __init__(self, in_channels, num_classes):
+        super().__init__()
+        self.pred = nn.Sequential(
+            CNNBlock(in_channels, 2 * in_channels, kernel_size=3, padding=1),
+            # (num_classes + 5 is from po, x, y, w, h of anchor boxes; x 3 for number of anchors)
+            CNNBlock(2 * in_channels, (num_classes + 5) * 3, bn_act=False, kernel_size=1)
+        )
+        self.num_classes = num_classes
+    
+    def forward(self, x):
+        return (
+            self.pred(x)
+            .reshape(x.shape[0], 3, self.num_classes + 5, x.shape[2], x.shape[3])
+            .permute(0, 1, 3, 4, 2) # reorder the dimentions (i.e. (num_classes + 5) will show up last)
+        )
+        # num_batches x 3 x 13(gridsize) x 13 x (5 + num_classes)
+
+class YOLOv3(nn.Module):
+    def __init__(self, in_channels=3, num_classes=20): #num classes in POC vascal as default
+        super().__init__()
+        self.num_classes = num_classes
+        self.in_channels = in_channels
+        self.layers = self._create_conv_layers()
+
+    def forward(self, x):
+        outputs = [] #output for each scale predictions
+        route_connections = []
+
+        for layer in self.layers:
+            if isinstance(layer, ScalePrediction):
+                outputs.append(layer(x))
+                continue 
+
+            x = layer(x)
+
+            if isinstance(layer, ResidualBlock) and layer.num_repeats == 8:
+                route_connections.append(x)
+            
+            elif isinstance(layer, nn.Upsample):
+                x = torch.cat([x, route_connections[-1]], dim=1)
+                route_connections.pop()
+            
+        return outputs
+
+
+    def _create_conv_layers(self):
+        layers = nn.ModuleList() #creating conv layers from config specified above
+        in_channels = self.in_channels
+
+        for module in config:
+            if isinstance(module, tuple):
+                out_channels, kernel_size, stride = module
+                layers.append(
+                    CNNBlock(
+                        in_channels,
+                        out_channels,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=1 if kernel_size==3 else 0
+                    )
+                )
+
+                in_channels = out_channels #in_channel of next block is the out_channels of current block
+
+            elif isinstance(module, list):
+                num_repeats = module[1] #["B", num_repeat] structure of config
+                layers.append(ResidualBlock(in_channels, num_repeats=num_repeats))
+
+            elif isinstance(module, str):
+                if module == "S":
+                    layers += [
+                        ResidualBlock(in_channels, use_residual=False, num_repeats=1),
+                        CNNBlock(in_channels, in_channels//2, kernel_size=1),
+                        ScalePrediction(in_channels//2, num_classes=self.num_classes)
+                    ]
+                    in_channels = in_channels // 2
+                
+                elif module == "U":
+                    layers.append(nn.Upsample(scale_factor=2))
+                    in_channels = in_channels * 3 
+
+        return layers
+
+
+# testing make sure our code works
 if __name__ == "__main__":
-    blocks = parse_config('./cfg/yolov3.cfg')
-    model = create_modules(blocks)
-
-    print(model)
+    num_classes = 20
+    IMAGE_SIZE = 416 
+    model = YOLOv3(num_classes=num_classes)
+    x = torch.randn((2, 3, IMAGE_SIZE, IMAGE_SIZE))
+    out = model(x)
+    assert out[0].shape == (2, 3, IMAGE_SIZE//32, IMAGE_SIZE//32, num_classes + 5) #IMAGE_SIZE//32 (13 x 13)
+    assert out[1].shape == (2, 3, IMAGE_SIZE//16, IMAGE_SIZE//16, num_classes + 5) #(26 x 26)
+    assert out[2].shape == (2, 3, IMAGE_SIZE//8, IMAGE_SIZE//8, num_classes + 5) #(52 x 52)
+    print("Success")
+    # print(model.layers)
